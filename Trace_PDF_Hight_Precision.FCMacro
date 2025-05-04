@@ -1,0 +1,327 @@
+import FreeCAD
+import FreeCADGui
+import Part
+from PySide import QtGui, QtCore
+import numpy as np
+import cv2
+import tempfile
+import os
+import json
+from PIL import Image
+
+# Configurazione globale
+CONFIG_FILE = os.path.join(FreeCAD.getUserAppDataDir(), "PDF_Tracer_Presets.json")
+
+class PDFTracerDialog(QtGui.QDialog):
+    def __init__(self):
+        super(PDFTracerDialog, self).__init__()
+        self.presets = self.load_presets()
+        self.current_preset = None
+        self.setupUI()
+
+    def setupUI(self):
+        self.setWindowTitle("✏️ PDF Tracer - Ultimate Pro")
+        self.setMinimumWidth(500)
+        
+        layout = QtGui.QVBoxLayout()
+        
+        # --- Sezione Preset ---
+        self.preset_group = QtGui.QGroupBox("Preset")
+        preset_layout = QtGui.QHBoxLayout()
+        
+        self.preset_combo = QtGui.QComboBox()
+        self.preset_combo.addItem("Nuovo preset...")
+        self.preset_combo.addItems(self.presets.keys())
+        self.preset_combo.currentIndexChanged.connect(self.apply_preset)
+        
+        self.save_preset_btn = QtGui.QPushButton("💾 Salva")
+        self.save_preset_btn.clicked.connect(self.save_preset)
+        
+        self.delete_preset_btn = QtGui.QPushButton("🗑️ Elimina")
+        self.delete_preset_btn.clicked.connect(self.delete_preset)
+        
+        preset_layout.addWidget(self.preset_combo)
+        preset_layout.addWidget(self.save_preset_btn)
+        preset_layout.addWidget(self.delete_preset_btn)
+        self.preset_group.setLayout(preset_layout)
+        
+        # --- Sezione Colore ---
+        self.color_group = QtGui.QGroupBox("Filtro Colore (RGB)")
+        color_layout = QtGui.QGridLayout()
+        
+        self.color_enable = QtGui.QCheckBox("Abilita filtro colore")
+        self.color_enable.setChecked(False)
+        
+        color_layout.addWidget(QtGui.QLabel("Soglia R:"), 0, 0)
+        self.color_r = QtGui.QSpinBox()
+        self.color_r.setRange(0, 255)
+        self.color_r.setValue(0)
+        color_layout.addWidget(self.color_r, 0, 1)
+        
+        color_layout.addWidget(QtGui.QLabel("Soglia G:"), 1, 0)
+        self.color_g = QtGui.QSpinBox()
+        self.color_g.setRange(0, 255)
+        self.color_g.setValue(0)
+        color_layout.addWidget(self.color_g, 1, 1)
+        
+        color_layout.addWidget(QtGui.QLabel("Soglia B:"), 2, 0)
+        self.color_b = QtGui.QSpinBox()
+        self.color_b.setRange(0, 255)
+        self.color_b.setValue(0)
+        color_layout.addWidget(self.color_b, 2, 1)
+        
+        color_layout.addWidget(self.color_enable, 3, 0, 1, 2)
+        self.color_group.setLayout(color_layout)
+        
+        # --- Sezione Scala Automatica ---
+        self.scale_group = QtGui.QGroupBox("Scala Automatica")
+        scale_layout = QtGui.QHBoxLayout()
+        
+        self.auto_scale_cb = QtGui.QCheckBox("Rileva scala da riferimento (10mm)")
+        self.auto_scale_cb.setChecked(False)
+        
+        scale_layout.addWidget(self.auto_scale_cb)
+        self.scale_group.setLayout(scale_layout)
+        
+        # --- Sezione Parametri Base ---
+        self.basic_group = QtGui.QGroupBox("Parametri Base")
+        basic_layout = QtGui.QVBoxLayout()
+        
+        self.resolution_slider = self.create_slider("Risoluzione (DPI):", 300, 72, 1200)
+        self.threshold_slider = self.create_slider("Soglia bianco/nero (0-255):", 128, 0, 255)
+        self.epsilon_slider = self.create_slider("Precisione contorni (0-100):", 5, 0, 100)
+        
+        basic_layout.addWidget(self.resolution_slider['group'])
+        basic_layout.addWidget(self.threshold_slider['group'])
+        basic_layout.addWidget(self.epsilon_slider['group'])
+        self.basic_group.setLayout(basic_layout)
+        
+        # --- Sezione Avanzata ---
+        self.advanced_group = QtGui.QGroupBox("Opzioni Avanzate")
+        advanced_layout = QtGui.QVBoxLayout()
+        
+        self.noise_slider = self.create_slider("Filtro anti-rumore (px):", 3, 0, 20)
+        self.merge_checkbox = QtGui.QCheckBox("Unisci contorni vicini (gap ≤ 0.5mm)")
+        self.merge_checkbox.setChecked(False)
+        self.invert_y_cb = QtGui.QCheckBox("Inverti asse Y")
+        self.invert_y_cb.setChecked(True)
+        self.separate_shapes_cb = QtGui.QCheckBox("Crea shapes separate")
+        self.separate_shapes_cb.setChecked(True)
+        
+        advanced_layout.addWidget(self.noise_slider['group'])
+        advanced_layout.addWidget(self.merge_checkbox)
+        advanced_layout.addWidget(self.invert_y_cb)
+        advanced_layout.addWidget(self.separate_shapes_cb)
+        self.advanced_group.setLayout(advanced_layout)
+        
+        # --- Pulsante Esegui ---
+        self.trace_btn = QtGui.QPushButton("🚀 Traccia PDF")
+        self.trace_btn.setStyleSheet("font-weight: bold; padding: 5px;")
+        self.trace_btn.clicked.connect(self.start_tracing)
+        
+        # --- Organizzazione Layout ---
+        layout.addWidget(self.preset_group)
+        layout.addWidget(self.color_group)
+        layout.addWidget(self.scale_group)
+        layout.addWidget(self.basic_group)
+        layout.addWidget(self.advanced_group)
+        layout.addWidget(self.trace_btn)
+        
+        self.setLayout(layout)
+    
+    def create_slider(self, label, default, min_val, max_val):
+        group = QtGui.QGroupBox(label)
+        layout = QtGui.QHBoxLayout()
+        
+        slider = QtGui.QSlider(QtCore.Qt.Horizontal)
+        slider.setRange(min_val, max_val)
+        slider.setValue(default)
+        
+        value_label = QtGui.QLabel(str(default))
+        slider.valueChanged.connect(lambda v: value_label.setText(str(v)))
+        
+        layout.addWidget(slider)
+        layout.addWidget(value_label)
+        group.setLayout(layout)
+        
+        return {'group': group, 'slider': slider, 'label': value_label}
+    
+    def load_presets(self):
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        return {}
+    
+    def save_presets(self):
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(self.presets, f, indent=4)
+    
+    def apply_preset(self, index):
+        if index > 0:  # Ignora "Nuovo preset..."
+            preset_name = self.preset_combo.currentText()
+            self.current_preset = preset_name
+            params = self.presets[preset_name]
+            
+            # Applica tutti i parametri
+            self.resolution_slider['slider'].setValue(params['resolution'])
+            self.threshold_slider['slider'].setValue(params['threshold'])
+            self.epsilon_slider['slider'].setValue(params['epsilon'] * 10000)
+            self.noise_slider['slider'].setValue(params['noise'])
+            self.merge_checkbox.setChecked(params['merge'])
+            self.invert_y_cb.setChecked(params['invert_y'])
+            self.separate_shapes_cb.setChecked(params['separate'])
+            self.color_enable.setChecked(params['color_enable'])
+            self.color_r.setValue(params['color_r'])
+            self.color_g.setValue(params['color_g'])
+            self.color_b.setValue(params['color_b'])
+            self.auto_scale_cb.setChecked(params['auto_scale'])
+    
+    def save_preset(self):
+        name, ok = QtGui.QInputDialog.getText(self, "Salva Preset", "Nome preset:")
+        if ok and name:
+            self.presets[name] = {
+                'resolution': self.resolution_slider['slider'].value(),
+                'threshold': self.threshold_slider['slider'].value(),
+                'epsilon': self.epsilon_slider['slider'].value() / 10000.0,
+                'noise': self.noise_slider['slider'].value(),
+                'merge': self.merge_checkbox.isChecked(),
+                'invert_y': self.invert_y_cb.isChecked(),
+                'separate': self.separate_shapes_cb.isChecked(),
+                'color_enable': self.color_enable.isChecked(),
+                'color_r': self.color_r.value(),
+                'color_g': self.color_g.value(),
+                'color_b': self.color_b.value(),
+                'auto_scale': self.auto_scale_cb.isChecked()
+            }
+            self.save_presets()
+            self.preset_combo.addItem(name)
+            self.preset_combo.setCurrentIndex(self.preset_combo.count() - 1)
+    
+    def delete_preset(self):
+        if self.current_preset:
+            del self.presets[self.current_preset]
+            self.save_presets()
+            self.preset_combo.removeItem(self.preset_combo.currentIndex())
+            self.current_preset = None
+    
+    def start_tracing(self):
+        params = {
+            'resolution': self.resolution_slider['slider'].value(),
+            'threshold': self.threshold_slider['slider'].value(),
+            'epsilon': self.epsilon_slider['slider'].value() / 10000.0,
+            'noise': self.noise_slider['slider'].value(),
+            'merge': self.merge_checkbox.isChecked(),
+            'invert_y': self.invert_y_cb.isChecked(),
+            'separate': self.separate_shapes_cb.isChecked(),
+            'color_enable': self.color_enable.isChecked(),
+            'color_r': self.color_r.value(),
+            'color_g': self.color_g.value(),
+            'color_b': self.color_b.value(),
+            'auto_scale': self.auto_scale_cb.isChecked()
+        }
+        self.close()
+        trace_pdf_ultimate_pro(**params)
+
+def trace_pdf_ultimate_pro(
+    resolution=300, threshold=128, epsilon=0.0005, noise=3, merge=False,
+    invert_y=True, separate=True, color_enable=False, color_r=0, color_g=0, color_b=0,
+    auto_scale=False
+):
+    filename = QtGui.QFileDialog.getOpenFileName(None, "Seleziona file PDF", "", "PDF files (*.pdf)")[0]
+    if not filename: return
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_img = os.path.join(temp_dir, "temp.png")
+        os.system(f"pdftoppm -png -singlefile -r {resolution} {filename} {temp_img[:-4]}")
+        
+        if not os.path.exists(temp_img):
+            FreeCAD.Console.PrintError("Errore conversione PDF.\n")
+            return
+
+        # Carica immagine a colori
+        img = cv2.imread(temp_img)
+        if img is None: return
+
+        # Filtro colore
+        if color_enable:
+            lower_bound = np.array([color_b, color_g, color_r])
+            upper_bound = np.array([255, 255, 255])
+            mask = cv2.inRange(img, lower_bound, upper_bound)
+            img = cv2.bitwise_and(img, img, mask=mask)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Scala automatica (ricerca quadrato 10mm)
+        scale_factor = 1.0
+        if auto_scale:
+            # Cerca un quadrato di riferimento nero di 10mm
+            _, binary = cv2.threshold(img, 128, 255, cv2.THRESH_BINARY_INV)
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                x, y, w, h = cv2.boundingRect(cnt)
+                aspect_ratio = float(w) / h
+                if 0.95 < aspect_ratio < 1.05 and 50 < w < 500:  # Quadrato approssimativo
+                    scale_factor = 10.0 / (w * (25.4 / resolution))  # 10mm / (pixel_to_mm * w)
+                    break
+
+        # Elaborazione immagine
+        if noise > 0:
+            img = cv2.medianBlur(img, noise if noise % 2 != 0 else noise + 1)
+        
+        _, binary = cv2.threshold(img, threshold, 255, cv2.THRESH_BINARY_INV)
+        contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Creazione contorni in FreeCAD
+        pixel_to_mm = 25.4 / resolution * scale_factor
+        wires = []
+        
+        for contour in contours:
+            approx = cv2.approxPolyDP(contour, epsilon * cv2.arcLength(contour, True), True)
+            points = [
+                FreeCAD.Vector(
+                    p[0][0] * pixel_to_mm,
+                    (img.shape[0] - p[0][1]) * pixel_to_mm if invert_y else p[0][1] * pixel_to_mm,
+                    0
+                ) for p in approx
+            ]
+            
+            if len(points) > 2:
+                if points[0] != points[-1]:
+                    points.append(points[0])
+                wires.append(Part.makePolygon(points))
+
+        # Unione contorni
+        if merge and len(wires) > 1:
+            merged_wires = []
+            tolerance = 0.5  # mm
+            for wire in wires:
+                if not merged_wires:
+                    merged_wires.append(wire)
+                else:
+                    last_wire = merged_wires[-1]
+                    if wire.distToShape(last_wire)[0] <= tolerance:
+                        merged_wires[-1] = last_wire.fuse(wire).Wires[0]
+                    else:
+                        merged_wires.append(wire)
+            wires = merged_wires
+
+        # Creazione oggetti
+        doc = FreeCAD.ActiveDocument or FreeCAD.newDocument()
+        doc.Label = f"PDF_Traced_{resolution}DPI"
+        
+        if separate:
+            for i, wire in enumerate(wires):
+                obj = doc.addObject("Part::Feature", f"Contour_{i}")
+                obj.Shape = wire
+        else:
+            compound = Part.Compound(wires)
+            obj = doc.addObject("Part::Feature", "Merged_Contours")
+            obj.Shape = compound
+        
+        doc.recompute()
+        FreeCAD.Console.PrintMessage(f"✅ Tracciati {len(wires)} contorni | Scala: {scale_factor:.2f}x\n")
+
+# Esegui
+dialog = PDFTracerDialog()
+dialog.exec_()
